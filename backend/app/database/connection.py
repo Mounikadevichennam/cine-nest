@@ -36,7 +36,7 @@ def get_engine():
         new_query = urlencode([(k, v) for k, vals in query_dict.items() for v in vals])
         clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
         
-        connect_args = {}
+        connect_args = {"connect_timeout": 10}
         if ssl_ca:
             connect_args["ssl"] = {"ca": ssl_ca}
         elif ssl_mode:
@@ -53,8 +53,7 @@ def get_engine():
                 pool_recycle=3600,
                 echo=False
             )
-            with eng.connect() as conn:
-                logger.info(f"Successfully connected to MySQL database ({hostname}).")
+            logger.info(f"Successfully initialized MySQL database engine ({hostname}).")
             return eng, False
         except Exception as e:
             if is_production:
