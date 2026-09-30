@@ -309,12 +309,11 @@ class TMDBService:
         if "jr" in lower_q and "ntr" in lower_q or lower_q in ["ntr", "jr ntr", "jr. ntr"]:
             q_filter = q_filter | Movie.movie_actors.any(MovieActor.actor.has(Actor.name.ilike("%N.T. Rama Rao Jr.%")))
 
-        if is_year:
-            q_filter = q_filter | (Movie.release_year == int(clean_q))
+        local_results = db.query(Movie).filter(Movie.poster_url != None, q_filter).limit(40).all()
+        if len(local_results) >= 5 or not api_key:
+            return local_results
 
-        return db.query(Movie).filter(Movie.poster_url != None, q_filter).limit(40).all()
-
-        # Level 2 TMDB Search & Ingestion if local results are empty
+        # Level 2 TMDB Search & Ingestion if local results are empty or insufficient
         try:
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CineNest/1.0"}
             with httpx.Client(timeout=2.0, headers=headers) as client:
