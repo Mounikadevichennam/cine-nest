@@ -1,0 +1,169 @@
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.orm import Session
+from typing import List, Optional
+from app.database.connection import get_db
+from app.auth.dependencies import get_current_user, require_admin
+from app.models.user import User
+from app.models.movie import Movie, Genre, Actor
+from app.models.activity import WatchHistory, Like, NotInterested, Rating, SearchHistory, ContinueWatching, RecentActivity
+from app.schemas.movie import MovieResponse
+from app.schemas.activity import WatchProgressUpdate, RatingCreate, LikeCreate, NotInterestedCreate
+
+router = APIRouter(prefix="/api/v1/movies", tags=["Public Movie Catalog"])
+
+@router.get("", response_model=List[MovieResponse])
+def get_movies(
+    skip: int = 0,
+    limit: int = 50,
+    language: Optional[str] = None,
+    genre: Optional[str] = None,
+    year: Optional[int] = None,
+    min_rating: Optional[float] = None,
+    db: Session = Depends(get_db)
+):
+    """Retrieve catalog movies with optional language, genre, year, and rating filtering."""
+    query = db.query(Movie).filter(Movie.poster_url != None)
+
+    if language:
+        query = query.filter(Movie.language.ilike(f"%{language}%"))
+    if year:
+        query = query.filter(Movie.release_year == year)
+    if min_rating:
+        query = query.filter(Movie.imdb_rating >= min_rating)
+    if genre:
+        query = query.filter(Movie.genres.any(Genre.name.ilike(f"%{genre}%")))
+
+    return query.offset(skip).limit(limit).all()
+
+@router.get("/search", response_model=List[MovieResponse])
+def search_movies(
+    q: str = Query(..., min_length=1),
+    current_user: Optional[User] = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Two-Level Search Endpoint: Searches local DB and syncs live TMDB actor & title results."""
+    if current_user:
+        try:
+            search_rec = SearchHistory(user_id=current_user.id, search_query=q)
+            db.add(search_rec)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    from app.services.tmdb_service import TMDBService
+    return TMDBService.search_and_sync_movies(db, q)
+
+@router.get("/{movie_id}", response_model=MovieResponse)
+def get_movie_details(movie_id: int, db: Session = Depends(get_db)):
+    """Retrieve movie details by ID."""
+    movie = db.query(Movie).filter(Movie.id == movie_id).first()
+    if not movie:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    return movie
+
+@router.post("/{movie_id}/watch")
+def record_watch_progress(
+    movie_id: int,
+    progress: WatchProgressUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Track watch progress, completion percentage, and continue watching state."""
+    movie = db.query(Movie).filter(Movie.id == movie_id).first()
+    if not movie:
+        raise HTTPException(status_code=404, detail="Movie not found")
+
+    is_completed = progress.completion_percentage >= 90.0
+
+    # Watch History
+    wh = db.query(WatchHistory).filter(WatchHistory.user_id == current_user.id, WatchHistory.movie_id == movie_id).first()
+    if not wh:
+        wh = WatchHistory(
+            user_id=current_user.id,
+            movie_id=movie_id,
+            progress_seconds=progress.progress_seconds,
+            completion_percentage=progress.completion_percentage,
+            completed=is_completed,
+            watch_count=1
+        )
+        db.add(wh)
+    else:
+        wh.progress_seconds = max(wh.progress_seconds, progress.progress_seconds)
+        wh.completion_percentage = max(wh.completion_percentage, progress.completion_percentage)
+        wh.completed = wh.completed or is_completed
+        wh.watch_count = (wh.watch_count or 1) + 1
+
+    # Continue Watching (Upsert)
+    cw = db.query(ContinueWatching).filter(ContinueWatching.user_id == current_user.id, ContinueWatching.movie_id == movie_id).first()
+    if not is_completed:
+        if not cw:
+            cw = ContinueWatching(
+                user_id=current_user.id,
+                movie_id=movie_id,
+                progress_seconds=progress.progress_seconds,
+                completion_percentage=progress.completion_percentage
+            )
+            db.add(cw)
+        else:
+            cw.progress_seconds = progress.progress_seconds
+            cw.completion_percentage = progress.completion_percentage
+    elif cw:
+        db.delete(cw) # Remove from Continue Watching once completed
+
+    # Log Recent Activity
+    activity = RecentActivity(user_id=current_user.id, movie_id=movie_id, activity_type="WATCHED")
+    db.add(activity)
+
+    db.commit()
+    return {"status": "success", "completed": is_completed}
+
+@router.post("/{movie_id}/like")
+def toggle_like(
+    movie_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Toggle Like status on a movie."""
+    lk = db.query(Like).filter(Like.user_id == current_user.id, Like.movie_id == movie_id).first()
+    if lk:
+        db.delete(lk)
+        message = "Unliked movie"
+        liked = False
+    else:
+        lk = Like(user_id=current_user.id, movie_id=movie_id)
+        db.add(lk)
+        message = "Liked movie"
+        liked = True
+    db.commit()
+    return {"status": "success", "message": message, "liked": liked}
+
+@router.post("/{movie_id}/not-interested")
+def mark_not_interested(
+    movie_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Mark a movie as Not Interested (applies negative preference weight)."""
+    ni = db.query(NotInterested).filter(NotInterested.user_id == current_user.id, NotInterested.movie_id == movie_id).first()
+    if not ni:
+        ni = NotInterested(user_id=current_user.id, movie_id=movie_id)
+        db.add(ni)
+        db.commit()
+    return {"status": "success", "message": "Marked movie as Not Interested"}
+
+@router.post("/{movie_id}/rate")
+def rate_movie(
+    movie_id: int,
+    rating_in: RatingCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Submit a 1 to 5 user rating."""
+    r = db.query(Rating).filter(Rating.user_id == current_user.id, Rating.movie_id == movie_id).first()
+    if not r:
+        r = Rating(user_id=current_user.id, movie_id=movie_id, rating=rating_in.rating)
+        db.add(r)
+    else:
+        r.rating = rating_in.rating
+    db.commit()
+    return {"status": "success", "rating": rating_in.rating}
