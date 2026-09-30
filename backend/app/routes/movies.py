@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.database.connection import get_db
-from app.auth.dependencies import get_current_user, require_admin
+from app.auth.dependencies import get_current_user, get_optional_current_user, require_admin
 from app.models.user import User
 from app.models.movie import Movie, Genre, Actor
 from app.models.activity import WatchHistory, Like, NotInterested, Rating, SearchHistory, ContinueWatching, RecentActivity
@@ -38,7 +38,7 @@ def get_movies(
 @router.get("/search", response_model=List[MovieResponse])
 def search_movies(
     q: str = Query(..., min_length=1),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_current_user),
     db: Session = Depends(get_db)
 ):
     """Two-Level Search Endpoint: Searches local DB and syncs live TMDB actor & title results."""

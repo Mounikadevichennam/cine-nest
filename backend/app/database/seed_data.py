@@ -193,7 +193,8 @@ def seed_database():
                     g = Genre(name=g_name)
                     db.add(g)
                     db.flush()
-                movie.genres.append(g)
+                if g not in movie.genres:
+                    movie.genres.append(g)
 
             db.add(movie)
             db.flush()
