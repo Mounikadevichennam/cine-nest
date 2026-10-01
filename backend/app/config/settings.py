@@ -16,7 +16,10 @@ class Settings(BaseSettings):
     )
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
-    TMDB_API_KEY: str = ""
+    TMDB_API_KEY: str = Field(
+        default="",
+        validation_alias=AliasChoices("TMDB_API_KEY", "TMDB_KEY", "TMDB_API_TOKEN")
+    )
     TMDB_BASE_URL: str = "https://api.themoviedb.org/3"
     CORS_ORIGINS: Any = Field(
         default=[

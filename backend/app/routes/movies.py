@@ -77,7 +77,10 @@ def get_movie_details(movie_id: int, db: Session = Depends(get_db)):
     """Retrieve movie details by ID or TMDB ID live."""
     movie = db.query(Movie).filter((Movie.id == movie_id) | (Movie.tmdb_id == movie_id)).first()
     if movie:
-        return TMDBService.enrich_movie_details(db, movie)
+        live_enrich = TMDBService.get_tmdb_movie_details_live(movie.tmdb_id or movie.id)
+        if live_enrich:
+            return live_enrich
+        return movie
 
     live_detail = TMDBService.get_tmdb_movie_details_live(movie_id)
     if live_detail:

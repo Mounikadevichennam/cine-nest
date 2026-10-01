@@ -1,7 +1,6 @@
-import httpx
-import json
+import os
 
-TMDB_API_KEY = "d7d6c342fd68868931a108381ab57bcf"
+TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
 BASE_URL = "https://api.themoviedb.org/3"
 
 titles = ["RRR", "Pushpa 2: The Rule", "Kalki 2898 AD", "Kantara", "Manjummel Boys", "Leo"]

@@ -1,4 +1,5 @@
 import httpx
+import time
 import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date
@@ -60,6 +61,7 @@ def resolve_language_name(iso_code: str) -> str:
 
 class TMDBService:
     BASE_URL = getattr(settings, "TMDB_BASE_URL", "https://api.themoviedb.org/3")
+    _client: Optional[httpx.Client] = None
 
     @classmethod
     def _get_headers(cls) -> dict:
@@ -154,6 +156,30 @@ class TMDBService:
         }
 
     @classmethod
+    def _get_client(cls) -> httpx.Client:
+        if cls._client is None or cls._client.is_closed:
+            cls._client = httpx.Client(
+                headers=cls._get_headers(),
+                timeout=10.0,
+                follow_redirects=True
+            )
+        return cls._client
+
+    @classmethod
+    def _safe_get(cls, url: str, params: dict, client: Optional[httpx.Client] = None) -> dict:
+        headers = cls._get_headers()
+        for attempt in range(3):
+            try:
+                verify_ssl = (attempt == 0)
+                r = httpx.get(url, params=params, headers=headers, timeout=10.0, follow_redirects=True, verify=verify_ssl)
+                if r.status_code == 200:
+                    return r.json()
+            except Exception as e:
+                logger.warning(f"TMDB request retry warning ({url}): {e}")
+                time.sleep(0.1)
+        return {}
+
+    @classmethod
     def search_tmdb_live(cls, query: str, page: int = 1) -> List[dict]:
         """
         Dynamic live TMDB search for movie titles, actor names, genres, languages, and release years.
@@ -168,46 +194,37 @@ class TMDBService:
         is_year = clean_q.isdigit() and len(clean_q) == 4
 
         raw_items = []
+        with httpx.Client(headers=cls._get_headers(), timeout=10.0, follow_redirects=True) as client:
+            # 1. Person / Actor Search on TMDB
+            try:
+                p_data = cls._safe_get(f"{cls.BASE_URL}/search/person", {"api_key": api_key, "query": clean_q, "page": page}, client=client)
+                p_results = p_data.get("results", [])
+                if p_results:
+                    pid = p_results[0].get("id")
+                    c_data = cls._safe_get(f"{cls.BASE_URL}/person/{pid}/movie_credits", {"api_key": api_key}, client=client)
+                    cast_movies = c_data.get("cast", [])[:20]
+                    raw_items.extend(cast_movies)
+            except Exception as e:
+                logger.warning(f"Live TMDB actor search error: {e}")
 
-        try:
-            with httpx.Client(timeout=4.0, headers=cls._get_headers()) as client:
-                # 1. Person / Actor Search on TMDB
-                try:
-                    p_res = client.get(f"{cls.BASE_URL}/search/person", params={"api_key": api_key, "query": clean_q, "page": page})
-                    if p_res.status_code == 200:
-                        p_results = p_res.json().get("results", [])
-                        if p_results:
-                            pid = p_results[0].get("id")
-                            c_res = client.get(f"{cls.BASE_URL}/person/{pid}/movie_credits", params={"api_key": api_key})
-                            if c_res.status_code == 200:
-                                cast_movies = c_res.json().get("cast", [])[:20]
-                                raw_items.extend(cast_movies)
-                except Exception as e:
-                    logger.warning(f"Live TMDB actor search error: {e}")
+            # 2. Movie Title / Year Search on TMDB
+            try:
+                m_params = {"api_key": api_key, "query": clean_q, "page": page}
+                if is_year:
+                    m_params["primary_release_year"] = int(clean_q)
+                m_data = cls._safe_get(f"{cls.BASE_URL}/search/movie", m_params, client=client)
+                raw_items.extend(m_data.get("results", []))
+            except Exception as e:
+                logger.warning(f"Live TMDB title search error: {e}")
 
-                # 2. Movie Title / Year Search on TMDB
-                try:
-                    m_params = {"api_key": api_key, "query": clean_q, "page": page}
-                    if is_year:
-                        m_params["primary_release_year"] = int(clean_q)
-                    m_res = client.get(f"{cls.BASE_URL}/search/movie", params=m_params)
-                    if m_res.status_code == 200:
-                        raw_items.extend(m_res.json().get("results", []))
-                except Exception as e:
-                    logger.warning(f"Live TMDB title search error: {e}")
-
-                # 3. Genre / Language Discover Search if query matches known genre
-                try:
-                    if lower_q in GENRE_NAME_TO_ID:
-                        gid = GENRE_NAME_TO_ID[lower_q]
-                        disc_res = client.get(f"{cls.BASE_URL}/discover/movie", params={"api_key": api_key, "with_genres": gid, "sort_by": "popularity.desc", "page": page})
-                        if disc_res.status_code == 200:
-                            raw_items.extend(disc_res.json().get("results", []))
-                except Exception as e:
-                    logger.warning(f"Live TMDB genre discover error: {e}")
-
-        except Exception as err:
-            logger.error(f"Error in search_tmdb_live: {err}")
+            # 3. Genre / Language Discover Search if query matches known genre
+            try:
+                if lower_q in GENRE_NAME_TO_ID:
+                    gid = GENRE_NAME_TO_ID[lower_q]
+                    disc_data = cls._safe_get(f"{cls.BASE_URL}/discover/movie", {"api_key": api_key, "with_genres": gid, "sort_by": "popularity.desc", "page": page}, client=client)
+                    raw_items.extend(disc_data.get("results", []))
+            except Exception as e:
+                logger.warning(f"Live TMDB genre discover error: {e}")
 
         # Deduplicate raw items by TMDB ID
         seen_ids = set()
@@ -227,15 +244,9 @@ class TMDBService:
         if not api_key:
             return []
 
-        try:
-            with httpx.Client(timeout=4.0, headers=cls._get_headers()) as client:
-                res = client.get(f"{cls.BASE_URL}/trending/movie/week", params={"api_key": api_key, "page": page})
-                if res.status_code == 200:
-                    results = res.json().get("results", [])[:limit]
-                    return [cls.format_tmdb_item_to_dict(it) for it in results]
-        except Exception as e:
-            logger.error(f"Error fetching TMDB live trending: {e}")
-        return []
+        data = cls._safe_get(f"{cls.BASE_URL}/trending/movie/week", {"api_key": api_key, "page": page})
+        results = data.get("results", [])[:limit]
+        return [cls.format_tmdb_item_to_dict(it) for it in results]
 
     @classmethod
     def fetch_new_releases_live(cls, page: int = 1, limit: int = 20) -> List[dict]:
@@ -244,18 +255,12 @@ class TMDBService:
         if not api_key:
             return []
 
-        try:
-            with httpx.Client(timeout=4.0, headers=cls._get_headers()) as client:
-                res = client.get(
-                    f"{cls.BASE_URL}/discover/movie",
-                    params={"api_key": api_key, "primary_release_year": 2024, "sort_by": "popularity.desc", "page": page}
-                )
-                if res.status_code == 200:
-                    results = res.json().get("results", [])[:limit]
-                    return [cls.format_tmdb_item_to_dict(it) for it in results]
-        except Exception as e:
-            logger.error(f"Error fetching TMDB live new releases: {e}")
-        return []
+        data = cls._safe_get(
+            f"{cls.BASE_URL}/discover/movie",
+            {"api_key": api_key, "primary_release_year": 2024, "sort_by": "popularity.desc", "page": page}
+        )
+        results = data.get("results", [])[:limit]
+        return [cls.format_tmdb_item_to_dict(it) for it in results]
 
     @classmethod
     def fetch_genre_movies_live(cls, genre_name: str, page: int = 1, limit: int = 15) -> List[dict]:
@@ -266,18 +271,12 @@ class TMDBService:
         if not api_key or not gid:
             return []
 
-        try:
-            with httpx.Client(timeout=4.0, headers=cls._get_headers()) as client:
-                res = client.get(
-                    f"{cls.BASE_URL}/discover/movie",
-                    params={"api_key": api_key, "with_genres": gid, "sort_by": "popularity.desc", "page": page}
-                )
-                if res.status_code == 200:
-                    results = res.json().get("results", [])[:limit]
-                    return [cls.format_tmdb_item_to_dict(it) for it in results]
-        except Exception as e:
-            logger.error(f"Error fetching TMDB live genre movies: {e}")
-        return []
+        data = cls._safe_get(
+            f"{cls.BASE_URL}/discover/movie",
+            {"api_key": api_key, "with_genres": gid, "sort_by": "popularity.desc", "page": page}
+        )
+        results = data.get("results", [])[:limit]
+        return [cls.format_tmdb_item_to_dict(it) for it in results]
 
     @classmethod
     def fetch_actor_movies_live(cls, actor_name: str, page: int = 1, limit: int = 15) -> List[dict]:
@@ -286,19 +285,13 @@ class TMDBService:
         if not api_key or not actor_name:
             return []
 
-        try:
-            with httpx.Client(timeout=4.0, headers=cls._get_headers()) as client:
-                p_res = client.get(f"{cls.BASE_URL}/search/person", params={"api_key": api_key, "query": actor_name, "page": page})
-                if p_res.status_code == 200:
-                    p_results = p_res.json().get("results", [])
-                    if p_results:
-                        pid = p_results[0].get("id")
-                        c_res = client.get(f"{cls.BASE_URL}/person/{pid}/movie_credits", params={"api_key": api_key})
-                        if c_res.status_code == 200:
-                            cast_movies = c_res.json().get("cast", [])[:limit]
-                            return [cls.format_tmdb_item_to_dict(it) for it in cast_movies]
-        except Exception as e:
-            logger.error(f"Error fetching TMDB live actor movies: {e}")
+        p_data = cls._safe_get(f"{cls.BASE_URL}/search/person", {"api_key": api_key, "query": actor_name, "page": page})
+        p_results = p_data.get("results", [])
+        if p_results:
+            pid = p_results[0].get("id")
+            c_data = cls._safe_get(f"{cls.BASE_URL}/person/{pid}/movie_credits", {"api_key": api_key})
+            cast_movies = c_data.get("cast", [])[:limit]
+            return [cls.format_tmdb_item_to_dict(it) for it in cast_movies]
         return []
 
     @classmethod
@@ -308,16 +301,12 @@ class TMDBService:
         if not api_key or not tmdb_id:
             return None
 
-        try:
-            with httpx.Client(timeout=4.0, headers=cls._get_headers()) as client:
-                res = client.get(
-                    f"{cls.BASE_URL}/movie/{tmdb_id}",
-                    params={"api_key": api_key, "append_to_response": "credits,videos"}
-                )
-                if res.status_code == 200:
-                    return cls.format_tmdb_item_to_dict(res.json())
-        except Exception as e:
-            logger.error(f"Error fetching live TMDB movie details for tmdb_id {tmdb_id}: {e}")
+        res_data = cls._safe_get(
+            f"{cls.BASE_URL}/movie/{tmdb_id}",
+            {"api_key": api_key, "append_to_response": "credits,videos"}
+        )
+        if res_data and "id" in res_data:
+            return cls.format_tmdb_item_to_dict(res_data)
         return None
 
     @classmethod
@@ -340,105 +329,103 @@ class TMDBService:
         if not api_key:
             return None
 
+        dd = cls._safe_get(
+            f"{cls.BASE_URL}/movie/{movie_id_or_tmdb_id}",
+            {"api_key": api_key, "append_to_response": "credits,videos"}
+        )
+        if not dd or "id" not in dd:
+            return None
+
         try:
-            with httpx.Client(timeout=4.0, headers=cls._get_headers()) as client:
-                res = client.get(
-                    f"{cls.BASE_URL}/movie/{movie_id_or_tmdb_id}",
-                    params={"api_key": api_key, "append_to_response": "credits,videos"}
-                )
-                if res.status_code != 200:
-                    return None
+            tmdb_id = dd.get("id")
+            title = dd.get("title") or dd.get("original_title") or "Untitled Movie"
+            poster_path = dd.get("poster_path")
+            backdrop_path = dd.get("backdrop_path")
+            release_date_str = dd.get("release_date")
+            overview = dd.get("overview", "")
+            orig_lang = dd.get("original_language", "en")
 
-                dd = res.json()
-                tmdb_id = dd.get("id")
-                title = dd.get("title") or dd.get("original_title") or "Untitled Movie"
-                poster_path = dd.get("poster_path")
-                backdrop_path = dd.get("backdrop_path")
-                release_date_str = dd.get("release_date")
-                overview = dd.get("overview", "")
-                orig_lang = dd.get("original_language", "en")
+            release_year = 2024
+            parsed_release_date = None
+            if release_date_str:
+                try:
+                    dt = datetime.strptime(release_date_str, "%Y-%m-%d")
+                    release_year = dt.year
+                    parsed_release_date = dt.date()
+                except ValueError:
+                    pass
 
-                release_year = 2024
-                parsed_release_date = None
-                if release_date_str:
-                    try:
-                        dt = datetime.strptime(release_date_str, "%Y-%m-%d")
-                        release_year = dt.year
-                        parsed_release_date = dt.date()
-                    except ValueError:
-                        pass
+            poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
+            backdrop_url = f"https://image.tmdb.org/t/p/w1280{backdrop_path}" if backdrop_path else None
 
-                poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
-                backdrop_url = f"https://image.tmdb.org/t/p/w1280{backdrop_path}" if backdrop_path else None
+            director_name = None
+            crew = dd.get("credits", {}).get("crew", [])
+            for member in crew:
+                if member.get("job") == "Director":
+                    director_name = member.get("name")
+                    break
 
-                director_name = None
-                crew = dd.get("credits", {}).get("crew", [])
-                for member in crew:
-                    if member.get("job") == "Director":
-                        director_name = member.get("name")
-                        break
+            trailer_url = None
+            is_official = False
+            videos = dd.get("videos", {}).get("results", [])
+            for v in videos:
+                if v.get("site") == "YouTube" and v.get("type") in ["Trailer", "Teaser"]:
+                    trailer_url = f"https://www.youtube.com/embed/{v.get('key')}"
+                    is_official = bool(v.get("official"))
+                    break
 
-                trailer_url = None
-                is_official = False
-                videos = dd.get("videos", {}).get("results", [])
-                for v in videos:
-                    if v.get("site") == "YouTube" and v.get("type") in ["Trailer", "Teaser"]:
-                        trailer_url = f"https://www.youtube.com/embed/{v.get('key')}"
-                        is_official = bool(v.get("official"))
-                        break
+            new_m = Movie(
+                tmdb_id=tmdb_id,
+                imdb_id=dd.get("imdb_id"),
+                title=title,
+                original_title=dd.get("original_title"),
+                description=overview,
+                storyline=overview,
+                release_date=parsed_release_date,
+                release_year=release_year,
+                imdb_rating=float(dd.get("vote_average", 0.0)),
+                imdb_vote_count=int(dd.get("vote_count", 0)),
+                popularity=float(dd.get("popularity", 0.0)),
+                poster_url=poster_url,
+                backdrop_url=backdrop_url,
+                trailer_url=trailer_url,
+                is_official_trailer=is_official,
+                language=resolve_language_name(orig_lang),
+                original_language=orig_lang,
+                country="India" if orig_lang in ["te", "hi", "ta", "ml", "kn"] else "USA",
+                director=director_name
+            )
 
-                new_m = Movie(
-                    tmdb_id=tmdb_id,
-                    imdb_id=dd.get("imdb_id"),
-                    title=title,
-                    original_title=dd.get("original_title"),
-                    description=overview,
-                    storyline=overview,
-                    release_date=parsed_release_date,
-                    release_year=release_year,
-                    imdb_rating=float(dd.get("vote_average", 0.0)),
-                    imdb_vote_count=int(dd.get("vote_count", 0)),
-                    popularity=float(dd.get("popularity", 0.0)),
-                    poster_url=poster_url,
-                    backdrop_url=backdrop_url,
-                    trailer_url=trailer_url,
-                    is_official_trailer=is_official,
-                    language=resolve_language_name(orig_lang),
-                    original_language=orig_lang,
-                    country="India" if orig_lang in ["te", "hi", "ta", "ml", "kn"] else "USA",
-                    director=director_name
-                )
+            for g in dd.get("genres", []):
+                gn = g.get("name")
+                if gn:
+                    dbg = db.query(Genre).filter(Genre.name == gn).first()
+                    if not dbg:
+                        dbg = Genre(name=gn)
+                        db.add(dbg)
+                        db.flush()
+                    new_m.genres.append(dbg)
 
-                for g in dd.get("genres", []):
-                    gn = g.get("name")
-                    if gn:
-                        dbg = db.query(Genre).filter(Genre.name == gn).first()
-                        if not dbg:
-                            dbg = Genre(name=gn)
-                            db.add(dbg)
-                            db.flush()
-                        new_m.genres.append(dbg)
+            db.add(new_m)
+            db.flush()
 
-                db.add(new_m)
-                db.flush()
+            cast_list = dd.get("credits", {}).get("cast", [])[:5]
+            for c in cast_list:
+                cn = c.get("name")
+                ch_name = c.get("character")
+                pp = c.get("profile_path")
+                purl = f"https://image.tmdb.org/t/p/w185{pp}" if pp else None
+                if cn:
+                    dba = db.query(Actor).filter(Actor.name == cn).first()
+                    if not dba:
+                        dba = Actor(name=cn, profile_image_url=purl)
+                        db.add(dba)
+                        db.flush()
+                    ma = MovieActor(movie_id=new_m.id, actor_id=dba.id, character_name=ch_name)
+                    db.add(ma)
 
-                cast_list = dd.get("credits", {}).get("cast", [])[:5]
-                for c in cast_list:
-                    cn = c.get("name")
-                    ch_name = c.get("character")
-                    pp = c.get("profile_path")
-                    purl = f"https://image.tmdb.org/t/p/w185{pp}" if pp else None
-                    if cn:
-                        dba = db.query(Actor).filter(Actor.name == cn).first()
-                        if not dba:
-                            dba = Actor(name=cn, profile_image_url=purl)
-                            db.add(dba)
-                            db.flush()
-                        ma = MovieActor(movie_id=new_m.id, actor_id=dba.id, character_name=ch_name)
-                        db.add(ma)
-
-                db.commit()
-                return new_m
+            db.commit()
+            return new_m
         except Exception as e:
             logger.error(f"Error in ensure_movie_in_db for {movie_id_or_tmdb_id}: {e}")
             db.rollback()
