@@ -45,29 +45,40 @@ def get_engine():
             # Default SSL configuration for cloud MySQL databases (like Aiven)
             connect_args["ssl"] = {}
 
-        try:
-            eng = create_engine(
-                clean_url,
-                connect_args=connect_args,
-                pool_pre_ping=True,
-                pool_recycle=3600,
-                echo=False
-            )
-            logger.info(f"Successfully initialized MySQL database engine ({hostname}).")
-            return eng, False
-        except Exception as e:
-            if is_production:
-                logger.error(f"CRITICAL: Production MySQL Connection Failed to host '{hostname}': {e}")
-                raise RuntimeError(
-                    f"Production MySQL Database Connection Failed: {e}. "
-                    "Ensure DATABASE_URL is set correctly in Render environment, Aiven MySQL service is active, and SSL/TLS credentials are valid."
-                ) from e
-            else:
-                logger.warning(
-                    f"Local MySQL connection to localhost:3306 failed ({e}). "
-                    "Falling back to local SQLite database for local development."
-                )
+        if is_localhost:
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            result = sock.connect_ex((hostname or "127.0.0.1", parsed.port or 3306))
+            sock.close()
+            if result != 0:
+                logger.info(f"Local MySQL server on {hostname}:3306 is offline. Falling back to local SQLite database (cinenest.db).")
                 raw_url = "sqlite:///./cinenest.db"
+
+        if not raw_url.startswith("sqlite"):
+            try:
+                eng = create_engine(
+                    clean_url,
+                    connect_args=connect_args,
+                    pool_pre_ping=True,
+                    pool_recycle=3600,
+                    echo=False
+                )
+                logger.info(f"Successfully initialized MySQL database engine ({hostname}).")
+                return eng, False
+            except Exception as e:
+                if is_production:
+                    logger.error(f"CRITICAL: Production MySQL Connection Failed to host '{hostname}': {e}")
+                    raise RuntimeError(
+                        f"Production MySQL Database Connection Failed: {e}. "
+                        "Ensure DATABASE_URL is set correctly in Render environment, Aiven MySQL service is active, and SSL/TLS credentials are valid."
+                    ) from e
+                else:
+                    logger.warning(
+                        f"Local MySQL connection to localhost:3306 failed ({e}). "
+                        "Falling back to local SQLite database for local development."
+                    )
+                    raw_url = "sqlite:///./cinenest.db"
 
     # Local SQLite database connection
     is_sqlite = raw_url.startswith("sqlite")

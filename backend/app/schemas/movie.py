@@ -25,7 +25,7 @@ class MovieBase(BaseModel):
     description: Optional[str] = None
     storyline: Optional[str] = None
     release_date: Optional[date] = None
-    release_year: int = Field(..., ge=1900, le=2030)
+    release_year: int = Field(..., ge=1800, le=2100)
     imdb_rating: Optional[float] = Field(default=0.0, ge=0.0, le=10.0)
     imdb_vote_count: Optional[int] = Field(default=0, ge=0)
     popularity: Optional[float] = 0.0
@@ -54,7 +54,7 @@ class MovieUpdate(BaseModel):
     description: Optional[str] = None
     storyline: Optional[str] = None
     release_date: Optional[date] = None
-    release_year: Optional[int] = Field(default=None, ge=1900, le=2030)
+    release_year: Optional[int] = Field(default=None, ge=1800, le=2100)
     imdb_rating: Optional[float] = None
     imdb_vote_count: Optional[int] = None
     popularity: Optional[float] = None

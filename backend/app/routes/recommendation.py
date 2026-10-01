@@ -5,9 +5,10 @@ from app.database.connection import get_db
 from app.auth.dependencies import get_current_user
 from app.models.user import User
 from app.models.movie import Movie
-from app.models.activity import ContinueWatching, WatchHistory
+from app.models.activity import ContinueWatching
 from app.schemas.movie import MovieResponse
 from app.recommendation.engine import RecommendationEngine
+from app.services.tmdb_service import TMDBService
 
 router = APIRouter(prefix="/api/v1/recommendations", tags=["Recommendation Engine"])
 
@@ -36,14 +37,13 @@ def get_by_favourite_genres(
     db: Session = Depends(get_db)
 ):
     """Recommendations matching user's onboarded favourite genres."""
-    fav_genre_ids = [g.id for g in current_user.favourite_genres]
-    if not fav_genre_ids:
-        return db.query(Movie).filter(Movie.poster_url != None).order_by(Movie.imdb_rating.desc()).limit(limit).all()
-    
-    return db.query(Movie).filter(
-        Movie.poster_url != None,
-        Movie.genres.any(Movie.genres.property.mapper.class_.id.in_(fav_genre_ids))
-    ).limit(limit).all()
+    fav_genres = [g.name for g in current_user.favourite_genres]
+    if fav_genres:
+        genre_name = fav_genres[0]
+        live_movies = TMDBService.fetch_genre_movies_live(genre_name, limit=limit)
+        if live_movies:
+            return live_movies
+    return TMDBService.fetch_trending_live(limit=limit)
 
 @router.get("/by-actors", response_model=List[MovieResponse])
 def get_by_favourite_actors(
@@ -52,24 +52,23 @@ def get_by_favourite_actors(
     db: Session = Depends(get_db)
 ):
     """Recommendations featuring user's onboarded favourite actors."""
-    fav_actor_ids = [a.id for a in current_user.favourite_actors]
-    if not fav_actor_ids:
-        return db.query(Movie).filter(Movie.poster_url != None).order_by(Movie.imdb_vote_count.desc()).limit(limit).all()
-
-    return db.query(Movie).filter(
-        Movie.poster_url != None,
-        Movie.movie_actors.any(Movie.movie_actors.property.mapper.class_.actor_id.in_(fav_actor_ids))
-    ).limit(limit).all()
+    fav_actors = [a.name for a in current_user.favourite_actors]
+    if fav_actors:
+        actor_name = fav_actors[0]
+        live_movies = TMDBService.fetch_actor_movies_live(actor_name, limit=limit)
+        if live_movies:
+            return live_movies
+    return TMDBService.fetch_trending_live(limit=limit)
 
 @router.get("/trending", response_model=List[MovieResponse])
 def get_trending_now(limit: int = 15, db: Session = Depends(get_db)):
-    """Trending / Popular movies feed ordered by vote count and rating."""
-    return db.query(Movie).filter(Movie.poster_url != None).order_by(Movie.imdb_vote_count.desc(), Movie.imdb_rating.desc()).limit(limit).all()
+    """Live Trending / Popular movies feed."""
+    return TMDBService.fetch_trending_live(limit=limit)
 
 @router.get("/new-releases", response_model=List[MovieResponse])
 def get_new_releases(limit: int = 15, db: Session = Depends(get_db)):
     """New Releases feed (2024-2026)."""
-    return db.query(Movie).filter(Movie.poster_url != None, Movie.release_year >= 2024).order_by(Movie.release_year.desc(), Movie.release_date.desc()).limit(limit).all()
+    return TMDBService.fetch_new_releases_live(limit=limit)
 
 @router.get("/continue-watching", response_model=List[MovieResponse])
 def get_continue_watching(

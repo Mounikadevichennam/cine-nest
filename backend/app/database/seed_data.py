@@ -166,6 +166,7 @@ def seed_database():
                 avatar="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80"
             )
             db.add(user_prof)
+            db.commit()
 
         # 3. Seed Movie Catalog
         for m_data in DEMO_MOVIES:
@@ -187,14 +188,16 @@ def seed_database():
             )
 
             # Genres
+            existing_g_ids = {g.id for g in movie.genres if g.id}
             for g_name in m_data["genres"]:
                 g = db.query(Genre).filter(Genre.name == g_name).first()
                 if not g:
                     g = Genre(name=g_name)
                     db.add(g)
                     db.flush()
-                if g not in movie.genres:
+                if g.id not in existing_g_ids:
                     movie.genres.append(g)
+                    existing_g_ids.add(g.id)
 
             db.add(movie)
             db.flush()
