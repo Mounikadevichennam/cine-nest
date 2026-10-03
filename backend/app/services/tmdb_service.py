@@ -168,10 +168,10 @@ class TMDBService:
     @classmethod
     def _safe_get(cls, url: str, params: dict, client: Optional[httpx.Client] = None) -> dict:
         headers = cls._get_headers()
+        cli = client or cls._get_client()
         for attempt in range(3):
             try:
-                verify_ssl = (attempt == 0)
-                r = httpx.get(url, params=params, headers=headers, timeout=10.0, follow_redirects=True, verify=verify_ssl)
+                r = cli.get(url, params=params, headers=headers, timeout=10.0)
                 if r.status_code == 200:
                     return r.json()
             except Exception as e:
@@ -322,6 +322,18 @@ class TMDBService:
         ).first()
 
         if movie:
+            p = movie.poster_url or ""
+            if not p or "3z8c8" in p or "stree2" in p or "j67X0f1" in p or "b02m18" in p:
+                live_info = cls.get_tmdb_movie_details_live(movie.tmdb_id or movie.id or movie_id_or_tmdb_id)
+                if live_info:
+                    if live_info.get("poster_url"): movie.poster_url = live_info["poster_url"]
+                    if live_info.get("backdrop_url"): movie.backdrop_url = live_info["backdrop_url"]
+                    if live_info.get("trailer_url"): movie.trailer_url = live_info["trailer_url"]
+                    if live_info.get("tmdb_id"): movie.tmdb_id = live_info["tmdb_id"]
+                    try:
+                        db.commit()
+                    except Exception:
+                        db.rollback()
             return movie
 
         # Fetch single movie from TMDB and insert minimal reference row

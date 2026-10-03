@@ -255,12 +255,38 @@ class RecommendationEngine:
 
         result_list = []
         for _, item in scored_movies[:limit]:
-            if "raw_dict" in item:
-                result_list.append(item["raw_dict"])
-            elif "db_obj" in item:
-                result_list.append(item["db_obj"])
+            raw = item.get("raw_dict")
+            db_obj = item.get("db_obj")
+
+            if raw:
+                if db_obj:
+                    if raw.get("poster_url"): db_obj.poster_url = raw["poster_url"]
+                    if raw.get("backdrop_url"): db_obj.backdrop_url = raw["backdrop_url"]
+                    if raw.get("trailer_url"): db_obj.trailer_url = raw["trailer_url"]
+                    if raw.get("tmdb_id"): db_obj.tmdb_id = raw["tmdb_id"]
+                result_list.append(raw)
+            elif db_obj:
+                poster = db_obj.poster_url or ""
+                if not poster or "3z8c8" in poster or "stree2" in poster or "j67X0f1" in poster or "b02m18" in poster:
+                    live_enrich = TMDBService.get_tmdb_movie_details_live(db_obj.tmdb_id or db_obj.id)
+                    if live_enrich and live_enrich.get("poster_url"):
+                        db_obj.poster_url = live_enrich["poster_url"]
+                        db_obj.backdrop_url = live_enrich.get("backdrop_url") or db_obj.backdrop_url
+                        db_obj.trailer_url = live_enrich.get("trailer_url") or db_obj.trailer_url
+                        if live_enrich.get("tmdb_id"):
+                            db_obj.tmdb_id = live_enrich["tmdb_id"]
+                        result_list.append(live_enrich)
+                    else:
+                        result_list.append(db_obj)
+                else:
+                    result_list.append(db_obj)
             else:
                 result_list.append(item)
+
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
 
         return result_list
 
