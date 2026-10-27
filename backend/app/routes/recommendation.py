@@ -38,11 +38,18 @@ def get_by_favourite_genres(
 ):
     """Recommendations matching user's onboarded favourite genres."""
     fav_genres = [g.name for g in current_user.favourite_genres]
+    pref_lang = current_user.preferred_language or "Telugu"
     if fav_genres:
         genre_name = fav_genres[0]
-        live_movies = TMDBService.fetch_genre_movies_live(genre_name, limit=limit)
+        live_movies = TMDBService.fetch_language_movies_live(pref_lang, genre_name=genre_name, limit=limit)
+        if not live_movies:
+            live_movies = TMDBService.fetch_genre_movies_live(genre_name, limit=limit)
         if live_movies:
             return live_movies
+    # Fallback to preferred language discovery
+    lang_movies = TMDBService.fetch_language_movies_live(pref_lang, limit=limit)
+    if lang_movies:
+        return lang_movies
     return TMDBService.fetch_trending_live(limit=limit)
 
 @router.get("/by-actors", response_model=List[MovieResponse])
@@ -54,10 +61,21 @@ def get_by_favourite_actors(
     """Recommendations featuring user's onboarded favourite actors."""
     fav_actors = [a.name for a in current_user.favourite_actors]
     if fav_actors:
-        actor_name = fav_actors[0]
-        live_movies = TMDBService.fetch_actor_movies_live(actor_name, limit=limit)
-        if live_movies:
-            return live_movies
+        actor_movies = []
+        for aname in fav_actors:
+            movies = TMDBService.fetch_actor_movies_live(aname, limit=limit)
+            for m in movies:
+                if not any((ex.get("tmdb_id") or ex.get("id")) == (m.get("tmdb_id") or m.get("id")) for ex in actor_movies):
+                    actor_movies.append(m)
+            if len(actor_movies) >= limit:
+                break
+        if actor_movies:
+            return actor_movies[:limit]
+    # Fallback to preferred language discovery rather than duplicating global trending
+    pref_lang = current_user.preferred_language or "Telugu"
+    lang_movies = TMDBService.fetch_language_movies_live(pref_lang, limit=limit)
+    if lang_movies:
+        return lang_movies
     return TMDBService.fetch_trending_live(limit=limit)
 
 @router.get("/trending", response_model=List[MovieResponse])
@@ -80,4 +98,16 @@ def get_continue_watching(
     movie_ids = [r.movie_id for r in records]
     if not movie_ids:
         return []
-    return db.query(Movie).filter(Movie.id.in_(movie_ids)).all()
+    movies = db.query(Movie).filter(Movie.id.in_(movie_ids)).all()
+    # Enrich any movie with missing poster
+    for m in movies:
+        if not m.poster_url or not m.poster_url.startswith("http") or "unsplash" in m.poster_url:
+            live = TMDBService.get_tmdb_movie_details_live(m.tmdb_id or m.id)
+            if live and live.get("poster_url"):
+                m.poster_url = live["poster_url"]
+                m.backdrop_url = live.get("backdrop_url") or m.backdrop_url
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+    return movies

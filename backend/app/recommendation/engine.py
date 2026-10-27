@@ -57,12 +57,22 @@ class RecommendationEngine:
         # 1. Fetch live TMDB candidate pool in-memory
         live_candidates = []
         try:
-            live_candidates.extend(TMDBService.fetch_trending_live(limit=20))
-            live_candidates.extend(TMDBService.fetch_new_releases_live(limit=20))
+            pref_lang = (user.preferred_language or "Telugu").lower()
+            # A. Preferred Language top discovery (primary regional candidate pool)
+            live_candidates.extend(TMDBService.fetch_language_movies_live(pref_lang, limit=20))
+
+            # B. Favourite Genre candidates in Preferred Language + global
             for fg in user.favourite_genres:
-                live_candidates.extend(TMDBService.fetch_genre_movies_live(fg.name, limit=10))
+                live_candidates.extend(TMDBService.fetch_language_movies_live(pref_lang, genre_name=fg.name, limit=10))
+                live_candidates.extend(TMDBService.fetch_genre_movies_live(fg.name, limit=5))
+
+            # C. Favourite Actor candidates
             for fa in user.favourite_actors:
                 live_candidates.extend(TMDBService.fetch_actor_movies_live(fa.name, limit=10))
+
+            # D. Global Trending & New Releases for catalog diversity
+            live_candidates.extend(TMDBService.fetch_trending_live(limit=15))
+            live_candidates.extend(TMDBService.fetch_new_releases_live(limit=15))
         except Exception:
             pass
 
@@ -96,9 +106,23 @@ class RecommendationEngine:
 
         for lc in live_candidates:
             tid = lc.get("tmdb_id") or lc.get("id")
-            if tid and tid not in candidate_dict:
+            if not tid:
+                continue
+            if tid in candidate_dict:
+                existing = candidate_dict[tid]
+                if lc.get("poster_url"):
+                    existing["poster_url"] = lc["poster_url"]
+                if lc.get("backdrop_url"):
+                    existing["backdrop_url"] = lc["backdrop_url"]
+                if lc.get("trailer_url"):
+                    existing["trailer_url"] = lc["trailer_url"]
+                if lc.get("actors"):
+                    existing_actors = set(existing.get("actors", []))
+                    existing_actors.update(lc["actors"])
+                    existing["actors"] = list(existing_actors)
+                existing["raw_dict"] = lc
+            else:
                 g_objs = lc.get("genres", [])
-                g_names = [g["name"].lower() for g in g_objs if isinstance(g, dict) and "name" in g]
                 lc_dict = {
                     "id": lc.get("id"),
                     "tmdb_id": tid,
@@ -112,7 +136,7 @@ class RecommendationEngine:
                     "trailer_url": lc.get("trailer_url"),
                     "language": lc.get("language"),
                     "genres": g_objs,
-                    "actors": [],
+                    "actors": lc.get("actors", []),
                     "raw_dict": lc
                 }
                 candidate_dict[tid] = lc_dict
@@ -121,23 +145,37 @@ class RecommendationEngine:
             return []
 
         # 2. Extract explicit Not Interested negative preference IDs & details
+        not_interested_rows = db.query(NotInterested.movie_id, Movie.tmdb_id).outerjoin(Movie, Movie.id == NotInterested.movie_id).filter(NotInterested.user_id == user.id).all()
+        not_interested_ids = set()
+        for mid, tid in not_interested_rows:
+            if mid: not_interested_ids.add(mid)
+            if tid: not_interested_ids.add(tid)
+
         not_interested_movies = db.query(Movie).options(
             joinedload(Movie.genres),
             joinedload(Movie.movie_actors).joinedload(MovieActor.actor)
         ).join(NotInterested, NotInterested.movie_id == Movie.id).filter(NotInterested.user_id == user.id).all()
 
-        not_interested_tmdb_ids = {m.tmdb_id or m.id for m in not_interested_movies}
+        fav_genre_set = {g.name.lower() for g in user.favourite_genres}
+        fav_actor_set = {a.name.lower() for a in user.favourite_actors}
         disliked_genres: Set[str] = set()
         disliked_actors: Set[str] = set()
         for nm in not_interested_movies:
             for g in nm.genres:
-                disliked_genres.add(g.name.lower())
+                gn = g.name.lower()
+                if gn not in fav_genre_set:
+                    disliked_genres.add(gn)
             for ma in nm.movie_actors:
                 if ma.actor:
-                    disliked_actors.add(ma.actor.name.lower())
+                    an = ma.actor.name.lower()
+                    if an not in fav_actor_set:
+                        disliked_actors.add(an)
 
         # Filter out explicit Not Interested candidates
-        candidates = [c for tid, c in candidate_dict.items() if tid not in not_interested_tmdb_ids]
+        candidates = [
+            c for tid, c in candidate_dict.items() 
+            if tid not in not_interested_ids and c.get("id") not in not_interested_ids and c.get("tmdb_id") not in not_interested_ids
+        ]
         if not candidates:
             return []
 
@@ -150,20 +188,36 @@ class RecommendationEngine:
         fav_actors = db.query(Actor.name).join(user_favourite_actors).filter(user_favourite_actors.c.user_id == user.id).all()
         fav_actor_names = {a[0].lower() for a in fav_actors}
 
-        # 4. User behavioral feedback signals from DB
-        likes_movie_ids = {lk[0] for lk in db.query(Like.movie_id).filter(Like.user_id == user.id).all()}
-        ratings_map = {r.movie_id: r.rating for r in db.query(Rating).filter(Rating.user_id == user.id).all()}
-        
-        watch_records = db.query(WatchHistory).filter(WatchHistory.user_id == user.id).all()
-        watch_map = {w.movie_id: (w.completion_percentage, w.watch_count) for w in watch_records}
+        # 4. User behavioral feedback signals from DB (mapped to both internal id and tmdb_id)
+        likes_rows = db.query(Like.movie_id, Movie.tmdb_id).outerjoin(Movie, Movie.id == Like.movie_id).filter(Like.user_id == user.id).all()
+        likes_ids = set()
+        for mid, tid in likes_rows:
+            if mid: likes_ids.add(mid)
+            if tid: likes_ids.add(tid)
+
+        ratings_rows = db.query(Rating.movie_id, Movie.tmdb_id, Rating.rating).outerjoin(Movie, Movie.id == Rating.movie_id).filter(Rating.user_id == user.id).all()
+        ratings_map = {}
+        for mid, tid, rval in ratings_rows:
+            if mid: ratings_map[mid] = rval
+            if tid: ratings_map[tid] = rval
+
+        watch_rows = db.query(WatchHistory.movie_id, Movie.tmdb_id, WatchHistory.completion_percentage, WatchHistory.watch_count).outerjoin(Movie, Movie.id == WatchHistory.movie_id).filter(WatchHistory.user_id == user.id).all()
+        watch_map = {}
+        for mid, tid, comp, wcount in watch_rows:
+            if mid: watch_map[mid] = (comp, wcount)
+            if tid: watch_map[tid] = (comp, wcount)
 
         recent_searches = [
             s[0].lower() for s in db.query(SearchHistory.search_query).filter(SearchHistory.user_id == user.id).order_by(SearchHistory.searched_at.desc()).limit(5).all()
         ]
 
-        # 5. Pure-Python TF-IDF Plot Similarity
+        from app.models.activity import RecentActivity
+        recent_activity_rows = db.query(RecentActivity.movie_id, Movie.tmdb_id, Movie.title).outerjoin(Movie, Movie.id == RecentActivity.movie_id).filter(RecentActivity.user_id == user.id).order_by(RecentActivity.created_at.desc()).limit(10).all()
+        recent_activity_titles = [r[2].lower() for r in recent_activity_rows if r[2]]
+
+        # 5. Pure-Python TF-IDF Plot Similarity (15 pts)
         plots = [c.get("storyline") or c.get("description") or c.get("title") or "movie" for c in candidates]
-        profile_text = f"{pref_lang} {' '.join(fav_genre_names)} {' '.join(fav_actor_names)} {' '.join(recent_searches)}"
+        profile_text = f"{pref_lang} {' '.join(fav_genre_names)} {' '.join(fav_actor_names)} {' '.join(recent_searches)} {' '.join(recent_activity_titles)}"
         tfidf_sims = compute_tfidf_cosine_sims(plots, profile_text)
 
         # 6. Compute 100-Point Hybrid Score for each candidate
@@ -208,37 +262,48 @@ class RecommendationEngine:
                 score += float(tfidf_sims[idx]) * 15.0
 
             # Signal E: User Behaviour Feedback (20 pts)
-            db_id = item.get("id")
-            if db_id in likes_movie_ids:
-                score += 10.0
+            mid = item.get("id")
+            tid = item.get("tmdb_id")
+            beh_score = 0.0
+            if (mid in likes_ids) or (tid in likes_ids):
+                beh_score += 10.0
 
-            user_rating = ratings_map.get(db_id)
+            user_rating = ratings_map.get(mid) or ratings_map.get(tid)
             if user_rating:
                 if user_rating == 5:
-                    score += 8.0
+                    beh_score += 8.0
                 elif user_rating == 4:
-                    score += 5.0
+                    beh_score += 5.0
                 elif user_rating == 3:
-                    score += 2.0
+                    beh_score += 0.0
                 elif user_rating == 2:
-                    score -= 5.0
+                    beh_score -= 5.0
                 elif user_rating == 1:
-                    score -= 10.0
+                    beh_score -= 10.0
 
-            watch_info = watch_map.get(db_id)
+            watch_info = watch_map.get(mid) or watch_map.get(tid)
             if watch_info:
                 completion, repeat_count = watch_info
-                score += (completion / 100.0) * 5.0
+                beh_score += (completion / 100.0) * 5.0
                 if repeat_count > 1:
-                    score += min(5.0, repeat_count * 2.0)
+                    beh_score += min(5.0, (repeat_count - 1) * 2.5)
 
-            # Signal F: Recent Search Interest (10 pts)
+            score += min(20.0, max(-15.0, beh_score))
+
+            # Signal F: Recent Interest (10 pts)
             title_lower = (item.get("title") or "").lower()
+            recent_score = 0.0
             if recent_searches:
                 for sq in recent_searches:
                     if sq in title_lower or any(sq in g for g in m_genres):
-                        score += 5.0
+                        recent_score += 5.0
                         break
+            if recent_activity_titles:
+                for rt in recent_activity_titles:
+                    if rt in title_lower or any(rt in g for g in m_genres):
+                        recent_score += 5.0
+                        break
+            score += min(10.0, recent_score)
 
             # Signal G: Rating (5 pts)
             r_val = float(item.get("imdb_rating") or 0.0)
@@ -258,7 +323,25 @@ class RecommendationEngine:
             raw = item.get("raw_dict")
             db_obj = item.get("db_obj")
 
+            # Check poster validity
+            p = item.get("poster_url") or ""
+            if not p or not p.startswith("http") or "unsplash" in p or "placeholder" in p:
+                tid = item.get("tmdb_id") or item.get("id")
+                if tid:
+                    live_enrich = TMDBService.get_tmdb_movie_details_live(tid)
+                    if live_enrich and live_enrich.get("poster_url"):
+                        item["poster_url"] = live_enrich["poster_url"]
+                        if live_enrich.get("backdrop_url"): item["backdrop_url"] = live_enrich["backdrop_url"]
+                        if live_enrich.get("trailer_url"): item["trailer_url"] = live_enrich["trailer_url"]
+                        if db_obj:
+                            db_obj.poster_url = live_enrich["poster_url"]
+                            db_obj.backdrop_url = live_enrich.get("backdrop_url") or db_obj.backdrop_url
+                            db_obj.trailer_url = live_enrich.get("trailer_url") or db_obj.trailer_url
+
             if raw:
+                raw["poster_url"] = item.get("poster_url")
+                raw["backdrop_url"] = item.get("backdrop_url")
+                raw["trailer_url"] = item.get("trailer_url")
                 if db_obj:
                     if raw.get("poster_url"): db_obj.poster_url = raw["poster_url"]
                     if raw.get("backdrop_url"): db_obj.backdrop_url = raw["backdrop_url"]
@@ -267,7 +350,7 @@ class RecommendationEngine:
                 result_list.append(raw)
             elif db_obj:
                 poster = db_obj.poster_url or ""
-                if not poster or "3z8c8" in poster or "stree2" in poster or "j67X0f1" in poster or "b02m18" in poster:
+                if not poster or not poster.startswith("http") or "unsplash" in poster or "placeholder" in poster:
                     live_enrich = TMDBService.get_tmdb_movie_details_live(db_obj.tmdb_id or db_obj.id)
                     if live_enrich and live_enrich.get("poster_url"):
                         db_obj.poster_url = live_enrich["poster_url"]
@@ -294,12 +377,17 @@ class RecommendationEngine:
     def get_because_you_watched(cls, db: Session, user: User, limit: int = 10) -> List[Any]:
         """Recommends movies similar to user's most recently watched movie using live TMDB candidates."""
         last_watch = db.query(WatchHistory).filter(WatchHistory.user_id == user.id).order_by(WatchHistory.watched_at.desc()).first()
+        pref_lang = user.preferred_language or "Telugu"
         if not last_watch:
-            return TMDBService.fetch_trending_live(limit=limit)
+            return TMDBService.fetch_language_movies_live(pref_lang, limit=limit)
 
         target_movie = db.query(Movie).options(joinedload(Movie.genres)).filter(Movie.id == last_watch.movie_id).first()
         if not target_movie:
-            return TMDBService.fetch_trending_live(limit=limit)
+            return TMDBService.fetch_language_movies_live(pref_lang, limit=limit)
 
         target_genre_name = target_movie.genres[0].name if target_movie.genres else "Action"
-        return TMDBService.fetch_genre_movies_live(target_genre_name, limit=limit)
+        target_lang = target_movie.language or pref_lang
+        movies = TMDBService.fetch_language_movies_live(target_lang, genre_name=target_genre_name, limit=limit)
+        if not movies:
+            movies = TMDBService.fetch_genre_movies_live(target_genre_name, limit=limit)
+        return movies

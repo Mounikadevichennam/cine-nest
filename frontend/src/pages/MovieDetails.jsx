@@ -12,6 +12,28 @@ export default function MovieDetails() {
   const [notInterested, setNotInterested] = useState(false);
   const [userRating, setUserRating] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [posterError, setPosterError] = useState(false);
+
+  const getPosterSrc = (m) => {
+    if (!m) return null;
+    const url = m.poster_url;
+    if (url && typeof url === 'string') {
+      if (url.includes('unsplash.com') || url.includes('placeholder')) {
+        return null;
+      }
+      if (url.startsWith('http')) {
+        return url;
+      }
+      if (url.startsWith('/')) {
+        return `https://image.tmdb.org/t/p/w500${url}`;
+      }
+    }
+    if (m.poster_path) {
+      const p = m.poster_path;
+      return p.startsWith('/') ? `https://image.tmdb.org/t/p/w500${p}` : `https://image.tmdb.org/t/p/w500/${p}`;
+    }
+    return null;
+  };
 
   useEffect(() => {
     const fetchDetails = async () => {
@@ -94,8 +116,24 @@ export default function MovieDetails() {
         {/* Details Card */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8 bg-[#141824] p-6 sm:p-8 rounded-2xl border border-gray-800 shadow-2xl">
           {/* Poster */}
-          <div className="aspect-[2/3] w-full max-w-xs mx-auto md:max-w-none rounded-xl overflow-hidden shadow-2xl border border-gray-700">
-            <img src={movie.poster_url} alt={movie.title} className="w-full h-full object-cover" />
+          <div className="aspect-[2/3] w-full max-w-xs mx-auto md:max-w-none rounded-xl overflow-hidden shadow-2xl border border-gray-700 bg-gray-900 flex items-center justify-center">
+            {!posterError && getPosterSrc(movie) ? (
+              <img 
+                src={getPosterSrc(movie)} 
+                alt={movie.title} 
+                onError={() => setPosterError(true)}
+                className="w-full h-full object-cover" 
+              />
+            ) : (
+              <div className="w-full h-full bg-gradient-to-br from-[#1c2234] to-[#0d1019] p-6 flex flex-col justify-between text-center border border-gray-800">
+                <Film className="w-12 h-12 text-red-600/70 mx-auto mt-8" />
+                <div>
+                  <p className="text-sm font-black text-white line-clamp-3 uppercase tracking-wider">{movie.title}</p>
+                  <p className="text-xs text-gray-400 mt-2">{movie.release_year}</p>
+                </div>
+                <span className="text-xs font-bold text-red-500 uppercase tracking-widest pb-2">CineNest</span>
+              </div>
+            )}
           </div>
 
           {/* Details Column */}

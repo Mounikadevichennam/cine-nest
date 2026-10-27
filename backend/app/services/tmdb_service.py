@@ -92,8 +92,23 @@ class TMDBService:
             except ValueError:
                 pass
 
-        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?auto=format&fit=crop&w=500&q=80"
-        backdrop_url = f"https://image.tmdb.org/t/p/w1280{backdrop_path}" if backdrop_path else None
+        poster_url = None
+        if poster_path:
+            if poster_path.startswith("http"):
+                poster_url = poster_path
+            elif poster_path.startswith("/"):
+                poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}"
+            else:
+                poster_url = f"https://image.tmdb.org/t/p/w500/{poster_path}"
+
+        backdrop_url = None
+        if backdrop_path:
+            if backdrop_path.startswith("http"):
+                backdrop_url = backdrop_path
+            elif backdrop_path.startswith("/"):
+                backdrop_url = f"https://image.tmdb.org/t/p/w1280{backdrop_path}"
+            else:
+                backdrop_url = f"https://image.tmdb.org/t/p/w1280/{backdrop_path}"
 
         genres_list = []
         if "genres" in item and isinstance(item["genres"], list):
@@ -124,6 +139,19 @@ class TMDBService:
                     director = member.get("name")
                     break
 
+        actors_list = []
+        if "credits" in item and isinstance(item["credits"], dict):
+            cast = item["credits"].get("cast", [])
+            for c in cast[:5]:
+                if isinstance(c, dict) and "name" in c and c["name"]:
+                    actors_list.append(c["name"].lower())
+        elif "actors" in item and isinstance(item["actors"], list):
+            for a in item["actors"]:
+                if isinstance(a, str):
+                    actors_list.append(a.lower())
+                elif isinstance(a, dict) and "name" in a:
+                    actors_list.append(a["name"].lower())
+
         now_str = datetime.now()
         return {
             "id": tmdb_id,
@@ -152,7 +180,8 @@ class TMDBService:
             "director": director,
             "created_at": now_str,
             "updated_at": now_str,
-            "genres": genres_list
+            "genres": genres_list,
+            "actors": actors_list
         }
 
     @classmethod
@@ -279,19 +308,60 @@ class TMDBService:
         return [cls.format_tmdb_item_to_dict(it) for it in results]
 
     @classmethod
+    def fetch_language_movies_live(cls, language_name: str, genre_name: Optional[str] = None, page: int = 1, limit: int = 20) -> List[dict]:
+        """Fetches popular movies in a specific language (and optional genre) from TMDB in-memory."""
+        api_key = settings.TMDB_API_KEY
+        if not api_key:
+            return []
+
+        clean_lang = (language_name or "").lower().strip()
+        iso = None
+        for code, name in KNOWN_LANGUAGES.items():
+            if name.lower() == clean_lang:
+                iso = code
+                break
+        if not iso:
+            iso = "te" if "telugu" in clean_lang else ("hi" if "hindi" in clean_lang else ("ta" if "tamil" in clean_lang else ("ml" if "malayalam" in clean_lang else ("kn" if "kannada" in clean_lang else "en"))))
+
+        params = {
+            "api_key": api_key,
+            "with_original_language": iso,
+            "sort_by": "popularity.desc",
+            "page": page
+        }
+        if genre_name:
+            clean_g = genre_name.lower().strip()
+            gid = GENRE_NAME_TO_ID.get(clean_g)
+            if gid:
+                params["with_genres"] = gid
+
+        data = cls._safe_get(f"{cls.BASE_URL}/discover/movie", params)
+        results = data.get("results", [])[:limit]
+        return [cls.format_tmdb_item_to_dict(it) for it in results]
+
+    @classmethod
     def fetch_actor_movies_live(cls, actor_name: str, page: int = 1, limit: int = 15) -> List[dict]:
         """Fetches movies featuring an actor from TMDB in-memory."""
         api_key = settings.TMDB_API_KEY
         if not api_key or not actor_name:
             return []
 
-        p_data = cls._safe_get(f"{cls.BASE_URL}/search/person", {"api_key": api_key, "query": actor_name, "page": page})
+        clean_actor = actor_name.strip()
+        p_data = cls._safe_get(f"{cls.BASE_URL}/search/person", {"api_key": api_key, "query": clean_actor, "page": page})
         p_results = p_data.get("results", [])
         if p_results:
             pid = p_results[0].get("id")
             c_data = cls._safe_get(f"{cls.BASE_URL}/person/{pid}/movie_credits", {"api_key": api_key})
             cast_movies = c_data.get("cast", [])[:limit]
-            return [cls.format_tmdb_item_to_dict(it) for it in cast_movies]
+            formatted_list = []
+            for it in cast_movies:
+                m_dict = cls.format_tmdb_item_to_dict(it)
+                if "actors" not in m_dict or not m_dict["actors"]:
+                    m_dict["actors"] = [clean_actor.lower()]
+                elif clean_actor.lower() not in m_dict["actors"]:
+                    m_dict["actors"].append(clean_actor.lower())
+                formatted_list.append(m_dict)
+            return formatted_list
         return []
 
     @classmethod
@@ -323,7 +393,7 @@ class TMDBService:
 
         if movie:
             p = movie.poster_url or ""
-            if not p or "3z8c8" in p or "stree2" in p or "j67X0f1" in p or "b02m18" in p:
+            if not p or not p.startswith("http") or "unsplash" in p or "placeholder" in p:
                 live_info = cls.get_tmdb_movie_details_live(movie.tmdb_id or movie.id or movie_id_or_tmdb_id)
                 if live_info:
                     if live_info.get("poster_url"): movie.poster_url = live_info["poster_url"]

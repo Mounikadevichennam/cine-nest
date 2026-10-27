@@ -5,11 +5,21 @@ import { Star, Play, Film } from 'lucide-react';
 export default function MovieCard({ movie }) {
   const getInitialPoster = (m) => {
     if (!m) return null;
-    if (m.poster_url && m.poster_url.startsWith('http')) {
-      return m.poster_url;
+    const url = m.poster_url;
+    if (url && typeof url === 'string') {
+      if (url.includes('unsplash.com') || url.includes('placeholder')) {
+        return null;
+      }
+      if (url.startsWith('http')) {
+        return url;
+      }
+      if (url.startsWith('/')) {
+        return `https://image.tmdb.org/t/p/w500${url}`;
+      }
     }
     if (m.poster_path) {
-      return `https://image.tmdb.org/t/p/w500${m.poster_path}`;
+      const p = m.poster_path;
+      return p.startsWith('/') ? `https://image.tmdb.org/t/p/w500${p}` : `https://image.tmdb.org/t/p/w500/${p}`;
     }
     return null;
   };

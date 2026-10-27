@@ -113,11 +113,18 @@ export default function Onboarding() {
   const handleFinish = async () => {
     setLoading(true);
     try {
+      const allActors = Object.values(ACTORS_BY_INDUSTRY).flat();
+      const selectedActorNames = selectedActorIds.map(id => {
+        const actorObj = allActors.find(a => a.id === id);
+        return actorObj ? actorObj.name : null;
+      }).filter(Boolean);
+
       // 1. Save Onboarding Preferences
       const onboardingRes = await api.post('/users/onboarding', {
         preferred_language: selectedLanguage,
         favourite_genre_names: selectedGenres,
-        favourite_actor_ids: selectedActorIds
+        favourite_actor_ids: selectedActorIds,
+        favourite_actor_names: selectedActorNames
       });
 
       // 2. Save User Profile

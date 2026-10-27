@@ -50,18 +50,16 @@ export default function Home() {
           }
         }
 
-        const finalRec = recData.length > 0 ? recData : generalCatalog;
+        const finalRec = recData.length > 0 ? recData : (trendData.length > 0 ? trendData : generalCatalog);
         const finalTrend = trendData.length > 0 ? trendData : generalCatalog;
         const finalNew = newData.length > 0 ? newData : generalCatalog.filter(m => m.release_year >= 2024);
-        const finalGenre = genreData.length > 0 ? genreData : generalCatalog;
-        const finalActor = actorData.length > 0 ? actorData : generalCatalog;
 
         setRecommended(finalRec);
         setTrending(finalTrend);
         setNewReleases(finalNew);
         setBecauseWatched(becData);
-        setByGenres(finalGenre);
-        setByActors(finalActor);
+        setByGenres(genreData);
+        setByActors(actorData);
         setContinueWatching(cwData);
 
         // Set Hero Movie

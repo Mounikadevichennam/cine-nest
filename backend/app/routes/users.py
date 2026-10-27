@@ -13,6 +13,7 @@ class OnboardingRequest(BaseModel):
     favourite_genre_ids: List[int] = []
     favourite_genre_names: List[str] = []
     favourite_actor_ids: List[int] = []
+    favourite_actor_names: List[str] = []
 
 router = APIRouter(prefix="/api/v1/users", tags=["Users & Profiles"])
 
@@ -27,14 +28,37 @@ def save_onboarding(
     
     # Update favourite genres
     if onboarding.favourite_genre_names:
-        genres = db.query(Genre).filter(Genre.name.in_(onboarding.favourite_genre_names)).all()
+        genres = []
+        for gname in onboarding.favourite_genre_names:
+            clean_g = gname.strip()
+            if not clean_g:
+                continue
+            g = db.query(Genre).filter(Genre.name.ilike(clean_g)).first()
+            if not g:
+                g = Genre(name=clean_g)
+                db.add(g)
+                db.flush()
+            genres.append(g)
         current_user.favourite_genres = genres
     elif onboarding.favourite_genre_ids:
         genres = db.query(Genre).filter(Genre.id.in_(onboarding.favourite_genre_ids)).all()
         current_user.favourite_genres = genres
 
     # Update favourite actors (max 5)
-    if onboarding.favourite_actor_ids:
+    if onboarding.favourite_actor_names:
+        actors = []
+        for aname in onboarding.favourite_actor_names[:5]:
+            clean_a = aname.strip()
+            if not clean_a:
+                continue
+            a = db.query(Actor).filter(Actor.name.ilike(clean_a)).first()
+            if not a:
+                a = Actor(name=clean_a)
+                db.add(a)
+                db.flush()
+            actors.append(a)
+        current_user.favourite_actors = actors
+    elif onboarding.favourite_actor_ids:
         actor_ids = onboarding.favourite_actor_ids[:5]
         actors = db.query(Actor).filter(Actor.id.in_(actor_ids)).all()
         current_user.favourite_actors = actors

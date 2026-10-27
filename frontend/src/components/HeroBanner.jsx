@@ -4,6 +4,11 @@ import { Play, Info, Star, X } from 'lucide-react';
 
 export default function HeroBanner({ movie }) {
   const [showTrailerModal, setShowTrailerModal] = useState(false);
+  const [imgSrc, setImgSrc] = useState(movie?.backdrop_url || movie?.poster_url);
+
+  React.useEffect(() => {
+    setImgSrc(movie?.backdrop_url || movie?.poster_url);
+  }, [movie]);
 
   if (!movie) return null;
 
@@ -11,11 +16,20 @@ export default function HeroBanner({ movie }) {
     <div className="relative w-full h-[75vh] min-h-[500px] max-h-[680px] overflow-hidden bg-[#0B0D12]">
       {/* Background Poster / Backdrop Image */}
       <div className="absolute inset-0">
-        <img 
-          src={movie.backdrop_url || movie.poster_url} 
-          alt={movie.title} 
-          className="w-full h-full object-cover object-center opacity-40 scale-102"
-        />
+        {imgSrc && (
+          <img 
+            src={imgSrc} 
+            alt={movie.title} 
+            onError={() => {
+              if (imgSrc !== movie.poster_url && movie.poster_url) {
+                setImgSrc(movie.poster_url);
+              } else {
+                setImgSrc(null);
+              }
+            }}
+            className="w-full h-full object-cover object-center opacity-40 scale-102"
+          />
+        )}
         <div className="absolute inset-0 bg-gradient-to-t from-[#0B0D12] via-[#0B0D12]/50 to-transparent" />
         <div className="absolute inset-0 bg-gradient-to-r from-[#0B0D12] via-[#0B0D12]/60 to-transparent" />
       </div>

@@ -8,14 +8,14 @@ class WatchProgressUpdate(BaseModel):
     completion_percentage: float = Field(..., ge=0.0, le=100.0)
 
 class RatingCreate(BaseModel):
-    movie_id: int
+    movie_id: Optional[int] = None
     rating: int = Field(..., ge=1, le=5) # 1 to 5 scale
 
 class LikeCreate(BaseModel):
-    movie_id: int
+    movie_id: Optional[int] = None
 
 class NotInterestedCreate(BaseModel):
-    movie_id: int
+    movie_id: Optional[int] = None
 
 class SearchCreate(BaseModel):
     search_query: str = Field(..., min_length=1, max_length=255)

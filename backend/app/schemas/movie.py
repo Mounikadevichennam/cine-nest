@@ -29,7 +29,7 @@ class MovieBase(BaseModel):
     imdb_rating: Optional[float] = Field(default=0.0, ge=0.0, le=10.0)
     imdb_vote_count: Optional[int] = Field(default=0, ge=0)
     popularity: Optional[float] = 0.0
-    poster_url: str = Field(..., description="Poster URL is required for catalog insertion")
+    poster_url: Optional[str] = Field(default=None, description="Poster URL for catalog item")
     backdrop_url: Optional[str] = None
     trailer_url: Optional[str] = None
     video_key: Optional[str] = None
